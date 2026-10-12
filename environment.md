@@ -2,63 +2,265 @@
 
 AgentForge is developed and evaluated on a fixed Ascend A2 environment.
 
-## Hardware
+This document describes both the reference environment and the steps required
+to create the Python environment used by AgentForge from scratch.
+
+---
+
+## 1. Reference Hardware
 
 - Accelerator: Ascend 910B2
 - Product family: Ascend A2
 - NPU count: 1
 - HBM: 64 GB
-
-## Operating System
-
-- Ubuntu 22.04.5 LTS
 - Architecture: aarch64
 
-## Ascend Software Stack
+## 2. Operating System
+
+- Ubuntu 22.04.5 LTS
+
+## 3. Ascend Software Stack
 
 - CANN: 9.1.0
 - Bisheng: 15.0.5
 - npu-smi: 26.1.1
 
-## Python Stack
+Reference CANN installation:
 
-- Python: 3.12.13
-- PyTorch: 2.10.0
+    /usr/local/Ascend/cann-9.1.0
+
+The standard environment setup script is:
+
+    /usr/local/Ascend/ascend-toolkit/set_env.sh
+
+## 4. Python
+
+Reference Python:
+
+    Python 3.12.13
+
+Reference interpreter:
+
+    /usr/local/python3.12.13/bin/python3
+
+AgentForge uses a Python virtual environment.
+
+The reference environment used during development is located at:
+
+    /workspace/agentforge-env
+
+`agentforge-env` is only the recommended environment name. It is not a
+pre-installed system environment. A different virtual environment path may be
+used, but the activation commands must be changed accordingly.
+
+---
+
+## 5. Create the Python Environment
+
+From a clean machine with the required Python and CANN installation available:
+
+    /usr/local/python3.12.13/bin/python3 -m venv /workspace/agentforge-env
+
+Activate the environment:
+
+    source /workspace/agentforge-env/bin/activate
+
+Upgrade the basic Python packaging tools:
+
+    python -m pip install --upgrade pip setuptools wheel
+
+The shell prompt may now show something similar to:
+
+    (agentforge-env)
+
+## 6. Install AgentForge Python Dependencies
+
+Move to the AgentForge repository:
+
+    cd /workspace/AgentForge
+
+Install the dependencies in `requirements.txt`.
+
+On the reference aarch64 Ascend environment, `torch_npu` is obtained from the
+Huawei Cloud PyPI mirror:
+
+    python -m pip install \
+      --index-url https://mirrors.huaweicloud.com/repository/pypi/simple \
+      --extra-index-url https://download.pytorch.org/whl/cpu \
+      -r requirements.txt
+
+The core reference versions are:
+
+- torch: 2.10.0
 - torch_npu: 2.10.0.post4
-- NumPy: 2.2.6
+- numpy: 2.2.6
 - PyYAML: 6.0.3
 
-## CANN Bench
+The exact environment used for the official competition will be frozen before
+the contest.
 
-Repository:
+Do not use a full system-wide `pip freeze` as the project dependency list.
+`requirements.txt` contains AgentForge project dependencies rather than every
+package pre-installed in the Ascend image.
 
-https://gitcode.com/cann/cann-bench.git
+---
 
-Frozen commit:
+## 7. Load the CANN Environment
 
-d212f691486ffa1ae0e4f7dfe42bc3cdafea883e
+The Python virtual environment and the CANN environment are separate.
 
-Hardware resolver:
+After activating the Python environment, load CANN:
 
-Ascend910B2 -> 910b2
+    source /workspace/agentforge-env/bin/activate
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
+Verify that the CANN installation is visible:
+
+    echo $ASCEND_HOME_PATH
+
+The reference environment should resolve to:
+
+    /usr/local/Ascend/cann-9.1.0
+
+Verify Bisheng:
+
+    which bisheng
+    bisheng --version
+
+---
+
+## 8. Verify PyTorch and torch_npu
+
+Run:
+
+    python - <<'PY'
+    import torch
+    import torch_npu
+
+    print("torch:", torch.__version__)
+    print("torch_npu:", torch_npu.__version__)
+    print("NPU available:", torch.npu.is_available())
+    print("NPU count:", torch.npu.device_count())
+
+    if torch.npu.is_available():
+        print("NPU name:", torch.npu.get_device_name(0))
+
+        x = torch.tensor(
+            [1.0, 2.0, 3.0],
+            dtype=torch.float32,
+            device="npu:0",
+        )
+
+        print("NPU tensor:", x)
+    PY
+
+The reference system should report:
+
+    torch: 2.10.0+cpu
+    torch_npu: 2.10.0.post4
+    NPU available: True
+    NPU count: 1
+    NPU name: Ascend910B2
+
+The `+cpu` suffix in the PyTorch version is expected. `torch_npu` provides the
+Ascend NPU backend.
+
+---
+
+## 9. CANN Bench
+
+AgentForge uses the open-source CANN Bench evaluator.
+
+Reference repository:
+
+    https://gitcode.com/cann/cann-bench.git
+
+Reference location used during development:
+
+    /workspace/cann-bench
+
+Clone the repository:
+
+    cd /workspace
+    git clone https://gitcode.com/cann/cann-bench.git
+    cd cann-bench
+
+The frozen AgentForge revision is:
+
+    d212f691486ffa1ae0e4f7dfe42bc3cdafea883e
+
+Checkout the frozen revision:
+
+    git checkout d212f691486ffa1ae0e4f7dfe42bc3cdafea883e
+
+Verify:
+
+    git rev-parse HEAD
+    git status
+
+The expected commit is:
+
+    d212f691486ffa1ae0e4f7dfe42bc3cdafea883e
+
+The working tree should remain clean during official evaluation.
+
+### Hardware Resolver
+
+The reference device reports:
+
+    Ascend910B2
+
+CANN Bench resolves this device to:
+
+    910b2
 
 Performance metadata:
 
-tasks/metadata/910b2.json
+    tasks/metadata/910b2.json
 
-The following AgentForge operators are all covered by the official
-910B2 metadata:
+The three AgentForge operators are covered by the official 910B2 metadata:
 
 - swi_glu
 - mhc_sinkhorn
 - engram_gate_fusion
 
-## Environment Initialization
+---
 
-Before development or evaluation:
+## 10. Daily Environment Initialization
 
-```
-bash
-source /workspace/agentforge-env/bin/activate
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-```
+After the environment has been created once, a new shell only needs:
+
+    source /workspace/agentforge-env/bin/activate
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
+Then verify the NPU if necessary:
+
+    npu-smi info
+
+Typical AgentForge development starts with:
+
+    cd /workspace/AgentForge
+
+CANN Bench evaluation starts with:
+
+    cd /workspace/cann-bench
+
+---
+
+## 11. Reference Toolchain Summary
+
+Reference development stack:
+
+    Ascend 910B2
+    Ubuntu 22.04.5 LTS
+    aarch64
+    CANN 9.1.0
+    Bisheng 15.0.5
+    Python 3.12.13
+    torch 2.10.0
+    torch_npu 2.10.0.post4
+    NumPy 2.2.6
+    PyYAML 6.0.3
+
+The official contest environment takes precedence over local environments if
+there is any difference.

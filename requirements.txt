@@ -1,18 +1,25 @@
 # AgentForge Python dependencies
 #
-# Target environment:
+# Reference platform:
+#   Ubuntu 22.04
+#   aarch64
 #   Python 3.12
-#   CANN 9.1.0
 #   Ascend 910B2
+#   CANN 9.1.0
 #
-# torch / torch_npu must stay aligned with CANN 9.1.0.
+# torch / torch_npu versions must remain compatible.
 
-torch==2.10.0
+--index-url https://mirrors.huaweicloud.com/repository/pypi/simple
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# Core PyTorch / Ascend stack
+torch==2.10.0; platform_machine == 'aarch64'
+torch==2.10.0+cpu; platform_machine == 'x86_64'
 torch_npu==2.10.0.post4
 
+# CANN Bench / AgentForge dependencies
 numpy==2.2.6
 pyyaml==6.0.3
-
 build
 scipy
 pandas
