@@ -1,0 +1,27 @@
+# AgentForge Python dependencies
+#
+# Target environment:
+#   Python 3.12
+#   CANN 9.1.0
+#   Ascend 910B2
+#
+# torch / torch_npu must stay aligned with CANN 9.1.0.
+
+torch==2.10.0
+torch_npu==2.10.0.post4
+
+numpy==2.2.6
+pyyaml==6.0.3
+
+build
+scipy
+pandas
+decorator
+attrs
+cloudpickle
+ml-dtypes
+psutil
+tornado
+expecttest
+protobuf
+ruamel.yaml>=0.18
