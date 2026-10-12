@@ -1,0 +1,16 @@
+operators:
+  swi_glu:
+    source_dir: operators/swi_glu/baseline
+    task_dir: tasks/level1/swi_glu
+
+  mhc_sinkhorn:
+    source_dir: operators/mhc_sinkhorn/baseline
+    task_dir: tasks/level3/mhc_sinkhorn
+
+  engram_gate_fusion:
+    source_dir: operators/engram_gate_fusion/baseline
+    task_dir: tasks/level3/engram_gate_fusion
+
+cann_bench:
+  root: /workspace/cann-bench
+  device_id: 0
