@@ -34,3 +34,5 @@ logs/
 # Temporary files
 tmp/
 *.tmp
+harness/starter/logs/
+harness/starter/workspaces/
