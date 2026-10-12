@@ -89,6 +89,12 @@ During the final autonomous optimization phase, manual kernel modification is no
 ## Repository Structure
 
     AgentForge/
+    ├── README.md
+    ├── environment.md
+    ├── requirements.txt
+    ├── run_agent.sh
+    ├── .gitignore
+    │
     ├── operators/
     │   ├── swi_glu/
     │   │   └── baseline/
@@ -97,17 +103,23 @@ During the final autonomous optimization phase, manual kernel modification is no
     │   └── engram_gate_fusion/
     │       └── baseline/
     │
-    ├── harness/
-    │   └── starter/
-    │
-    ├── tools/
-    ├── scripts/
-    ├── docs/
-    │
-    ├── requirements.txt
-    ├── environment.md
-    ├── .gitignore
-    └── README.md
+    └── harness/
+        └── starter/
+            ├── evaluator.py
+            ├── workspace.py
+            ├── iteration.py
+            ├── round.py
+            ├── inspector.py
+            ├── source_context.py
+            ├── runner.py
+            ├── agent_entrypoint.sh
+            ├── operators.yaml
+            ├── AGENT_PROTOCOL.md
+            ├── CONTESTANT_INTERFACE.md
+            └── skills/
+                ├── README.md
+                ├── SKILL_TEMPLATE.md
+                └── manifest.example.yaml
 
 ## Baselines
 

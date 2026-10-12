@@ -5,6 +5,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from inspector import write_inspection
 from iteration import (
     judge_candidate,
     load_metadata,
@@ -144,11 +145,43 @@ def prepare_round(operator, run_id):
         best_snapshot,
     )
 
+    print()
+    print("Inspecting current candidate...")
+    print()
+
+    (
+        inspection,
+        inspection_path,
+        overview_path,
+    ) = write_inspection(
+        operator,
+        run_id,
+        output_dir=target,
+    )
+
     context = build_context(
         operator,
         run_id,
         rid,
     )
+
+    context["inspection"] = {
+        "summary": inspection[
+            "summary"
+        ],
+        "inspection_file": str(
+            inspection_path
+        ),
+        "source_overview_file": str(
+            overview_path
+        ),
+        "kernel_files": inspection[
+            "kernel_files"
+        ],
+        "plugin_files": inspection[
+            "plugin_files"
+        ],
+    }
 
     context_path = (
         target / "context.json"
@@ -169,7 +202,12 @@ def prepare_round(operator, run_id):
 
     analysis_path.write_text(
         "# Analysis\n\n"
-        "<Agent writes analysis here.>\n",
+        "## Observed Bottlenecks\n\n"
+        "<Agent writes analysis here.>\n\n"
+        "## Optimization Opportunity\n\n"
+        "<Agent describes the proposed opportunity here.>\n\n"
+        "## Correctness Risks\n\n"
+        "<Agent describes correctness risks here.>\n",
         encoding="utf-8",
     )
 
@@ -206,6 +244,12 @@ def prepare_round(operator, run_id):
     )
     print(
         f"context    : {context_path}"
+    )
+    print(
+        f"inspection : {inspection_path}"
+    )
+    print(
+        f"overview   : {overview_path}"
     )
     print(
         f"analysis   : {analysis_path}"

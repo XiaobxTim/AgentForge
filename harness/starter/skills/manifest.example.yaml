@@ -1,0 +1,14 @@
+skills:
+  - name: example-self-authored
+    path: skills/example/SKILL.md
+    source: self-authored
+    revision: null
+    license: null
+    modified: false
+
+  - name: example-public-skill
+    path: skills/public-example/SKILL.md
+    source: https://example.com/public-repository
+    revision: "<commit-or-version>"
+    license: "<license>"
+    modified: true
