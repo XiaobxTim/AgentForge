@@ -2,6 +2,7 @@
 #include <tuple>
 
 #include "kernel_operator.h"
+#include "adv_api/activation/swish.h"
 #include "platform/platform_ascendc.h"
 
 class EngramStageAKernel {
@@ -934,6 +935,902 @@ void launch_engram_stage_a(
             hcMult,
             hiddenSize,
             normEps,
+            itemsPerBlock);
+}
+
+}
+
+
+// ============================================================================
+// Engram Stage B — Prefill baseline
+//
+// Input:
+//   valueGated        [B,L,HC,D] FP32
+//   normedValueGated  [B,L,HC,D] FP32
+//   convWeight        [HC*D,1,K] FP32
+//
+// Output:
+//   output            [B,L,HC,D] BF16
+//   convStateOut      [B,HC*D,stateLen] BF16
+//
+// This first Stage-B implementation handles Prefill only:
+// historical positions before token 0 are treated as zero.
+// ============================================================================
+
+class EngramStageBPrefillKernel {
+public:
+    __aicore__ inline void Init(
+        GM_ADDR valueGated,
+        GM_ADDR normedValueGated,
+        GM_ADDR convWeight,
+        GM_ADDR output,
+        GM_ADDR convStateOut,
+        int64_t batchSize,
+        int64_t seqLength,
+        int64_t hcMult,
+        int64_t hiddenSize,
+        int64_t kernelSize,
+        int64_t dilation,
+        int64_t itemsPerBlock)
+    {
+        batchSize_ = batchSize;
+        seqLength_ = seqLength;
+        hcMult_ = hcMult;
+        hiddenSize_ = hiddenSize;
+        kernelSize_ = kernelSize;
+        dilation_ = dilation;
+        itemsPerBlock_ = itemsPerBlock;
+
+        totalItems_ =
+            batchSize_ *
+            seqLength_ *
+            hcMult_;
+
+        stateLen_ =
+            (kernelSize_ - 1) *
+            dilation_;
+
+        valueGatedGm_.SetGlobalBuffer(
+            (__gm__ float*)valueGated);
+
+        normedValueGatedGm_.SetGlobalBuffer(
+            (__gm__ float*)normedValueGated);
+
+        convWeightGm_.SetGlobalBuffer(
+            (__gm__ float*)convWeight);
+
+        outputGm_.SetGlobalBuffer(
+            (__gm__ bfloat16_t*)output);
+
+        convStateOutGm_.SetGlobalBuffer(
+            (__gm__ bfloat16_t*)convStateOut);
+
+        const uint32_t vectorFloatBytes =
+            static_cast<uint32_t>(
+                hiddenSize_ * sizeof(float));
+
+        const uint32_t vectorBf16Bytes =
+            static_cast<uint32_t>(
+                hiddenSize_ *
+                sizeof(bfloat16_t));
+
+        const uint32_t weightBytes =
+            static_cast<uint32_t>(
+                hiddenSize_ *
+                kernelSize_ *
+                sizeof(float));
+
+        const uint32_t stateBytes =
+            static_cast<uint32_t>(
+                hiddenSize_ *
+                stateLen_ *
+                sizeof(bfloat16_t));
+
+        // Current [D] source vector from normedValueGated.
+        pipe_.InitBuffer(
+            sourceQueue_,
+            1,
+            vectorFloatBytes);
+
+        // Current [D] residual vector.
+        pipe_.InitBuffer(
+            valueGatedQueue_,
+            1,
+            vectorFloatBytes);
+
+        // Entire [D,K] conv-weight block for one HC.
+        pipe_.InitBuffer(
+            weightQueue_,
+            1,
+            weightBytes);
+
+        // Final BF16 output vector [D].
+        pipe_.InitBuffer(
+            outputQueue_,
+            1,
+            vectorBf16Bytes);
+
+        // Final state [D,stateLen].
+        pipe_.InitBuffer(
+            stateOutQueue_,
+            1,
+            stateBytes);
+
+        pipe_.InitBuffer(
+            sourceBuf_,
+            vectorFloatBytes);
+
+        pipe_.InitBuffer(
+            weightBlockBuf_,
+            weightBytes);
+
+        pipe_.InitBuffer(
+            weightVectorBuf_,
+            vectorFloatBytes);
+
+        pipe_.InitBuffer(
+            accumBuf_,
+            vectorFloatBytes);
+
+        pipe_.InitBuffer(
+            temp1Buf_,
+            vectorFloatBytes);
+
+        pipe_.InitBuffer(
+            temp2Buf_,
+            vectorFloatBytes);
+
+        pipe_.InitBuffer(
+            stateBuildBuf_,
+            stateBytes);
+    }
+
+    __aicore__ inline void Process()
+    {
+        const int64_t blockId =
+            static_cast<int64_t>(
+                AscendC::GetBlockIdx());
+
+        const int64_t firstItem =
+            blockId *
+            itemsPerBlock_;
+
+        if (firstItem >= totalItems_) {
+            return;
+        }
+
+        int64_t lastItem =
+            firstItem +
+            itemsPerBlock_;
+
+        if (lastItem > totalItems_) {
+            lastItem = totalItems_;
+        }
+
+        for (int64_t item = firstItem;
+             item < lastItem;
+             ++item) {
+            ProcessOneItem(item);
+        }
+    }
+
+private:
+    __aicore__ inline void SyncVectorToScalar()
+    {
+        AscendC::SetFlag<
+            AscendC::HardEvent::V_S>(1);
+
+        AscendC::WaitFlag<
+            AscendC::HardEvent::V_S>(1);
+    }
+
+    __aicore__ inline void SyncScalarToVector()
+    {
+        AscendC::SetFlag<
+            AscendC::HardEvent::S_V>(0);
+
+        AscendC::WaitFlag<
+            AscendC::HardEvent::S_V>(0);
+    }
+
+    __aicore__ inline int64_t ActivationOffset(
+        int64_t b,
+        int64_t l,
+        int64_t hc) const
+    {
+        return (
+            (
+                b * seqLength_ + l
+            ) * hcMult_ + hc
+        ) * hiddenSize_;
+    }
+
+    __aicore__ inline void BuildZeroSource()
+    {
+        auto source =
+            sourceBuf_.Get<float>();
+
+        for (int64_t d = 0;
+             d < hiddenSize_;
+             ++d) {
+            source.SetValue(
+                static_cast<uint32_t>(d),
+                0.0f);
+        }
+
+        SyncScalarToVector();
+    }
+
+    __aicore__ inline void LoadCurrentSource(
+        int64_t b,
+        int64_t l,
+        int64_t hc)
+    {
+        const int64_t offset =
+            ActivationOffset(
+                b,
+                l,
+                hc);
+
+        const uint32_t bytes =
+            static_cast<uint32_t>(
+                hiddenSize_ *
+                sizeof(float));
+
+        AscendC::DataCopyExtParams params{
+            1,
+            bytes,
+            0,
+            0,
+            0
+        };
+
+        AscendC::DataCopyPadExtParams<
+            float> pad{
+                false,
+                0,
+                0,
+                0
+            };
+
+        auto sourceLocal =
+            sourceQueue_
+                .AllocTensor<float>();
+
+        AscendC::DataCopyPad(
+            sourceLocal,
+            normedValueGatedGm_[offset],
+            params,
+            pad);
+
+        sourceQueue_.EnQue(
+            sourceLocal);
+
+        sourceLocal =
+            sourceQueue_
+                .DeQue<float>();
+
+        auto source =
+            sourceBuf_.Get<float>();
+
+        AscendC::Adds(
+            source,
+            sourceLocal,
+            0.0f,
+            static_cast<int32_t>(
+                hiddenSize_));
+
+        sourceQueue_.FreeTensor(
+            sourceLocal);
+    }
+
+    __aicore__ inline void LoadWeightBlock(
+        int64_t hc)
+    {
+        const int64_t offset =
+            hc *
+            hiddenSize_ *
+            kernelSize_;
+
+        const uint32_t bytes =
+            static_cast<uint32_t>(
+                hiddenSize_ *
+                kernelSize_ *
+                sizeof(float));
+
+        AscendC::DataCopyExtParams params{
+            1,
+            bytes,
+            0,
+            0,
+            0
+        };
+
+        AscendC::DataCopyPadExtParams<
+            float> pad{
+                false,
+                0,
+                0,
+                0
+            };
+
+        auto weightLocal =
+            weightQueue_
+                .AllocTensor<float>();
+
+        AscendC::DataCopyPad(
+            weightLocal,
+            convWeightGm_[offset],
+            params,
+            pad);
+
+        weightQueue_.EnQue(
+            weightLocal);
+
+        weightLocal =
+            weightQueue_
+                .DeQue<float>();
+
+        auto weightBlock =
+            weightBlockBuf_.Get<float>();
+
+        AscendC::Adds(
+            weightBlock,
+            weightLocal,
+            0.0f,
+            static_cast<int32_t>(
+                hiddenSize_ *
+                kernelSize_));
+
+        SyncVectorToScalar();
+
+        weightQueue_.FreeTensor(
+            weightLocal);
+    }
+
+    __aicore__ inline void BuildWeightVector(
+        int64_t k)
+    {
+        auto weightBlock =
+            weightBlockBuf_.Get<float>();
+
+        auto weightVector =
+            weightVectorBuf_.Get<float>();
+
+        for (int64_t d = 0;
+             d < hiddenSize_;
+             ++d) {
+
+            const uint32_t srcIndex =
+                static_cast<uint32_t>(
+                    d * kernelSize_ + k);
+
+            weightVector.SetValue(
+                static_cast<uint32_t>(d),
+                weightBlock.GetValue(
+                    srcIndex));
+        }
+
+        SyncScalarToVector();
+    }
+
+    __aicore__ inline void WriteStateOut(
+        int64_t b,
+        int64_t hc)
+    {
+        if (stateLen_ <= 0) {
+            return;
+        }
+
+        auto stateBuild =
+            stateBuildBuf_.Get<bfloat16_t>();
+
+        auto source =
+            sourceBuf_.Get<float>();
+
+        // Prefill:
+        // x_cat = [zero padding, x]
+        //
+        // state_out is the last stateLen positions of x_cat.
+        for (int64_t s = 0;
+             s < stateLen_;
+             ++s) {
+
+            const int64_t t =
+                seqLength_
+                - stateLen_
+                + s;
+
+            if (t < 0) {
+                const bfloat16_t zero =
+                    AscendC::Cast(0.0f);
+
+                for (int64_t d = 0;
+                     d < hiddenSize_;
+                     ++d) {
+
+                    const uint32_t dstIndex =
+                        static_cast<uint32_t>(
+                            d * stateLen_ + s);
+
+                    stateBuild.SetValue(
+                        dstIndex,
+                        zero);
+                }
+
+                continue;
+            }
+
+            LoadCurrentSource(
+                b,
+                t,
+                hc);
+
+            SyncVectorToScalar();
+
+            for (int64_t d = 0;
+                 d < hiddenSize_;
+                 ++d) {
+
+                const float value =
+                    source.GetValue(
+                        static_cast<uint32_t>(d));
+
+                const uint32_t dstIndex =
+                    static_cast<uint32_t>(
+                        d * stateLen_ + s);
+
+                stateBuild.SetValue(
+                    dstIndex,
+                    AscendC::Cast(value));
+            }
+        }
+
+        const int64_t gmOffset =
+            (
+                b * hcMult_
+                + hc
+            ) *
+            hiddenSize_ *
+            stateLen_;
+
+        const uint32_t bytes =
+            static_cast<uint32_t>(
+                hiddenSize_
+                * stateLen_
+                * sizeof(bfloat16_t));
+
+        AscendC::DataCopyExtParams params{
+            1,
+            bytes,
+            0,
+            0,
+            0
+        };
+
+        AscendC::DataCopyPad(
+            convStateOutGm_[gmOffset],
+            stateBuild,
+            params);
+    }
+
+    __aicore__ inline void ProcessOneItem(
+        int64_t item)
+    {
+        const int64_t hc =
+            item % hcMult_;
+
+        const int64_t token =
+            item / hcMult_;
+
+        const int64_t l =
+            token % seqLength_;
+
+        const int64_t b =
+            token / seqLength_;
+
+        const int64_t activationOffset =
+            ActivationOffset(
+                b,
+                l,
+                hc);
+
+        const int32_t count =
+            static_cast<int32_t>(
+                hiddenSize_);
+
+        // --------------------------------------------------
+        // Load [D,K] conv weights for this HC.
+        // --------------------------------------------------
+
+        LoadWeightBlock(hc);
+
+        auto source =
+            sourceBuf_.Get<float>();
+
+        auto weightVector =
+            weightVectorBuf_.Get<float>();
+
+        auto accum =
+            accumBuf_.Get<float>();
+
+        auto temp1 =
+            temp1Buf_.Get<float>();
+
+        auto temp2 =
+            temp2Buf_.Get<float>();
+
+        // --------------------------------------------------
+        // PyTorch F.conv1d is cross-correlation:
+        //
+        // y[l] =
+        // sum_k W[k] *
+        // x_cat[l + k*dilation]
+        //
+        // After removing left padding:
+        //
+        // source_t =
+        // l - (K - 1 - k) * dilation
+        // --------------------------------------------------
+
+        for (int64_t k = 0;
+             k < kernelSize_;
+             ++k) {
+
+            const int64_t historyDistance =
+                (
+                    kernelSize_
+                    - 1
+                    - k
+                ) *
+                dilation_;
+
+            const int64_t sourceToken =
+                l -
+                historyDistance;
+
+            if (sourceToken < 0) {
+                BuildZeroSource();
+            } else {
+                LoadCurrentSource(
+                    b,
+                    sourceToken,
+                    hc);
+            }
+
+            BuildWeightVector(k);
+
+            AscendC::Mul(
+                temp1,
+                source,
+                weightVector,
+                count);
+
+            if (k == 0) {
+                AscendC::Adds(
+                    accum,
+                    temp1,
+                    0.0f,
+                    count);
+            } else {
+                AscendC::Add(
+                    accum,
+                    accum,
+                    temp1,
+                    count);
+            }
+        }
+
+        // --------------------------------------------------
+        // SiLU(x) = Swish(x, beta=1)
+        // --------------------------------------------------
+
+        AscendC::Swish(
+            temp1,
+            accum,
+            static_cast<uint32_t>(count),
+            1.0f);
+
+        AscendC::Adds(
+            accum,
+            temp1,
+            0.0f,
+            count);
+
+
+        // --------------------------------------------------
+        // Residual:
+        // output = value_gated + conv_out
+        // --------------------------------------------------
+
+        const uint32_t floatBytes =
+            static_cast<uint32_t>(
+                hiddenSize_ *
+                sizeof(float));
+
+        AscendC::DataCopyExtParams
+            floatCopyParams{
+                1,
+                floatBytes,
+                0,
+                0,
+                0
+            };
+
+        AscendC::DataCopyPadExtParams<
+            float> floatPad{
+                false,
+                0,
+                0,
+                0
+            };
+
+        auto valueGatedLocal =
+            valueGatedQueue_
+                .AllocTensor<float>();
+
+        AscendC::DataCopyPad(
+            valueGatedLocal,
+            valueGatedGm_[
+                activationOffset],
+            floatCopyParams,
+            floatPad);
+
+        valueGatedQueue_.EnQue(
+            valueGatedLocal);
+
+        valueGatedLocal =
+            valueGatedQueue_
+                .DeQue<float>();
+
+        AscendC::Add(
+            accum,
+            accum,
+            valueGatedLocal,
+            count);
+
+        valueGatedQueue_.FreeTensor(
+            valueGatedLocal);
+
+        // --------------------------------------------------
+        // FP32 -> BF16 final output
+        // --------------------------------------------------
+
+        auto outputLocal =
+            outputQueue_
+                .AllocTensor<bfloat16_t>();
+
+        AscendC::Cast(
+            outputLocal,
+            accum,
+            AscendC::RoundMode::CAST_RINT,
+            count);
+
+        outputQueue_.EnQue(
+            outputLocal);
+
+        outputLocal =
+            outputQueue_
+                .DeQue<bfloat16_t>();
+
+        const uint32_t bf16Bytes =
+            static_cast<uint32_t>(
+                hiddenSize_ *
+                sizeof(bfloat16_t));
+
+        AscendC::DataCopyExtParams
+            bf16CopyParams{
+                1,
+                bf16Bytes,
+                0,
+                0,
+                0
+            };
+
+        AscendC::DataCopyPad(
+            outputGm_[
+                activationOffset],
+            outputLocal,
+            bf16CopyParams);
+
+        outputQueue_.FreeTensor(
+            outputLocal);
+
+        // Exactly one item for each [b,hc]
+        // generates conv_state_out.
+        if (l == seqLength_ - 1) {
+            WriteStateOut(
+                b,
+                hc);
+        }
+    }
+
+private:
+    AscendC::TPipe pipe_;
+
+    AscendC::GlobalTensor<float>
+        valueGatedGm_;
+
+    AscendC::GlobalTensor<float>
+        normedValueGatedGm_;
+
+    AscendC::GlobalTensor<float>
+        convWeightGm_;
+
+    AscendC::GlobalTensor<bfloat16_t>
+        outputGm_;
+
+    AscendC::GlobalTensor<bfloat16_t>
+        convStateOutGm_;
+
+    AscendC::TQue<
+        AscendC::QuePosition::VECIN,
+        1> sourceQueue_;
+
+    AscendC::TQue<
+        AscendC::QuePosition::VECIN,
+        1> valueGatedQueue_;
+
+    AscendC::TQue<
+        AscendC::QuePosition::VECIN,
+        1> weightQueue_;
+
+    AscendC::TQue<
+        AscendC::QuePosition::VECOUT,
+        1> outputQueue_;
+
+    AscendC::TQue<
+        AscendC::QuePosition::VECOUT,
+        1> stateOutQueue_;
+
+    AscendC::TBuf<
+        AscendC::TPosition::VECCALC>
+        sourceBuf_;
+
+    AscendC::TBuf<
+        AscendC::TPosition::VECCALC>
+        weightBlockBuf_;
+
+    AscendC::TBuf<
+        AscendC::TPosition::VECCALC>
+        weightVectorBuf_;
+
+    AscendC::TBuf<
+        AscendC::TPosition::VECCALC>
+        accumBuf_;
+
+    AscendC::TBuf<
+        AscendC::TPosition::VECCALC>
+        temp1Buf_;
+
+    AscendC::TBuf<
+        AscendC::TPosition::VECCALC>
+        temp2Buf_;
+
+    AscendC::TBuf<
+        AscendC::TPosition::VECCALC>
+        stateBuildBuf_;
+
+    int64_t batchSize_;
+    int64_t seqLength_;
+    int64_t hcMult_;
+    int64_t hiddenSize_;
+    int64_t kernelSize_;
+    int64_t dilation_;
+    int64_t stateLen_;
+
+    int64_t totalItems_;
+    int64_t itemsPerBlock_;
+};
+
+
+__global__ __aicore__ void
+engram_stage_b_prefill_kernel(
+    GM_ADDR valueGated,
+    GM_ADDR normedValueGated,
+    GM_ADDR convWeight,
+    GM_ADDR output,
+    GM_ADDR convStateOut,
+    int64_t batchSize,
+    int64_t seqLength,
+    int64_t hcMult,
+    int64_t hiddenSize,
+    int64_t kernelSize,
+    int64_t dilation,
+    int64_t itemsPerBlock)
+{
+    EngramStageBPrefillKernel op;
+
+    op.Init(
+        valueGated,
+        normedValueGated,
+        convWeight,
+        output,
+        convStateOut,
+        batchSize,
+        seqLength,
+        hcMult,
+        hiddenSize,
+        kernelSize,
+        dilation,
+        itemsPerBlock);
+
+    op.Process();
+}
+
+
+std::tuple<int64_t, int64_t>
+calc_engram_stage_b_tiling_params(
+    int64_t totalItems)
+{
+    auto platform =
+        platform_ascendc::
+            PlatformAscendCManager::
+                GetInstance();
+
+    int64_t coreNum =
+        platform->GetCoreNumAiv();
+
+    if (coreNum <= 0) {
+        coreNum = 1;
+    }
+
+    int64_t numBlocks =
+        totalItems;
+
+    if (numBlocks > coreNum) {
+        numBlocks = coreNum;
+    }
+
+    if (numBlocks <= 0) {
+        numBlocks = 1;
+    }
+
+    const int64_t itemsPerBlock =
+        (
+            totalItems +
+            numBlocks -
+            1
+        ) /
+        numBlocks;
+
+    return std::make_tuple(
+        numBlocks,
+        itemsPerBlock);
+}
+
+
+extern "C" {
+
+void launch_engram_stage_b_prefill(
+    GM_ADDR valueGated,
+    GM_ADDR normedValueGated,
+    GM_ADDR convWeight,
+    GM_ADDR output,
+    GM_ADDR convStateOut,
+    int64_t batchSize,
+    int64_t seqLength,
+    int64_t hcMult,
+    int64_t hiddenSize,
+    int64_t kernelSize,
+    int64_t dilation,
+    int64_t numBlocks,
+    int64_t itemsPerBlock,
+    void* stream)
+{
+    engram_stage_b_prefill_kernel
+        <<<numBlocks, nullptr, stream>>>(
+            valueGated,
+            normedValueGated,
+            convWeight,
+            output,
+            convStateOut,
+            batchSize,
+            seqLength,
+            hcMult,
+            hiddenSize,
+            kernelSize,
+            dilation,
             itemsPerBlock);
 }
 
