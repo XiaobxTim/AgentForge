@@ -512,7 +512,10 @@ def export_best(
 
 
 def run_optimization(args):
-    if args.budget < 0:
+    if (
+        args.budget is not None
+        and args.budget < 0
+    ):
         raise ValueError(
             "budget must be >= 0"
         )
@@ -541,9 +544,17 @@ def run_optimization(args):
     print(
         f"run_id        : {args.run_id}"
     )
-    print(
-        f"budget        : {args.budget} rounds"
-    )
+
+    if args.budget is None:
+        print(
+            "budget        : unlimited rounds "
+            "(external wall-clock applies)"
+        )
+    else:
+        print(
+            f"budget        : {args.budget} rounds"
+        )
+
     print(
         f"agent         : {args.agent_cmd}"
     )
@@ -563,7 +574,10 @@ def run_optimization(args):
 
     completed_rounds = 0
 
-    for _ in range(args.budget):
+    while (
+        args.budget is None
+        or completed_rounds < args.budget
+    ):
         rid = next_round_id(
             args.operator,
             args.run_id,
@@ -616,7 +630,6 @@ def run_optimization(args):
                 "Stopping autonomous run "
                 "because the Agent failed."
             )
-
             break
 
         finalize_round(
@@ -626,6 +639,17 @@ def run_optimization(args):
         )
 
         completed_rounds += 1
+
+        # Keep a valid best candidate checkpoint after every
+        # completed round. This preserves the latest accepted
+        # result if an external Final watchdog later terminates
+        # the autonomous run.
+        export_best(
+            args.operator,
+            args.run_id,
+            args.budget,
+            completed_rounds,
+        )
 
     (
         best_candidate,
@@ -666,8 +690,6 @@ def run_optimization(args):
         "summary          : "
         f"{summary_path}"
     )
-
-
 def main():
     parser = argparse.ArgumentParser(
         description=(
@@ -689,10 +711,13 @@ def main():
     parser.add_argument(
         "--budget",
         type=int,
-        required=True,
+        default=None,
         help=(
-            "Maximum number of autonomous "
-            "optimization rounds."
+            "Optional maximum number of autonomous "
+            "optimization rounds. If omitted, the "
+            "Starter Harness has no round limit and "
+            "the Final wall-clock limit is expected "
+            "to be enforced externally."
         ),
     )
 
