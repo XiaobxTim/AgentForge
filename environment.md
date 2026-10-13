@@ -167,7 +167,57 @@ Ascend NPU backend.
 
 ---
 
-## 9. CANN Bench
+
+## 9. Official Model and Reference Runtime
+
+AgentForge Final uses the organizer-provided Qwen3.5-4B BF16 model weights.
+
+Reference model location used during development:
+
+    /workspace/shared_assets/models/Qwen/Qwen3.5-4B
+
+During official evaluation, participants should not hard-code this path.
+The organizer provides the model location through:
+
+    AGENTFORGE_MODEL_PATH
+
+The Harness should read the model path from this environment variable.
+
+The verified reference model runtime is:
+
+- transformers: 5.19.0
+- accelerate: 1.15.0
+- safetensors: 0.8.0
+- pillow: 12.3.0
+
+This reference runtime has been verified with Qwen3.5-4B BF16 on Ascend 910B2.
+
+The reference runtime is provided for reproducibility and baseline development.
+It is not the only permitted inference runtime in Final evaluation. Teams may
+design their own compatible model loading and inference runtime, subject to the
+competition rules. The organizer standardizes the model weights rather than
+the internal runtime implementation.
+
+The organizer provides the following environment variables during Final:
+
+    AGENTFORGE_MODEL_PATH
+    AGENTFORGE_DEVICE
+    AGENTFORGE_TIME_LIMIT_SECONDS
+
+These variables are inherited by `run_agent.sh` and the child processes it
+starts. A team may read them from any component of its Harness. Use of
+`team_agent.sh` is optional and is not required for accessing these variables.
+
+For example, a Python Harness may obtain the model location with:
+
+    import os
+    model_path = os.environ["AGENTFORGE_MODEL_PATH"]
+
+Participants must not replace or override the organizer-provided model weights
+during official evaluation.
+
+---
+## 10. CANN Bench
 
 AgentForge uses the open-source CANN Bench evaluator.
 
@@ -226,7 +276,7 @@ The three AgentForge operators are covered by the official 910B2 metadata:
 
 ---
 
-## 10. Daily Environment Initialization
+## 11. Daily Environment Initialization
 
 After the environment has been created once, a new shell only needs:
 
@@ -247,7 +297,7 @@ CANN Bench evaluation starts with:
 
 ---
 
-## 11. Reference Toolchain Summary
+## 12. Reference Toolchain Summary
 
 Reference development stack:
 
@@ -261,6 +311,11 @@ Reference development stack:
     torch_npu 2.10.0.post4
     NumPy 2.2.6
     PyYAML 6.0.3
+    transformers 5.19.0
+    accelerate 1.15.0
+    safetensors 0.8.0
+    pillow 12.3.0
+    Qwen3.5-4B BF16 (reference model weights)
 
 The official contest environment takes precedence over local environments if
 there is any difference.

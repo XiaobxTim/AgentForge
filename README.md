@@ -34,6 +34,15 @@ The current validated environment is:
 - PyTorch: 2.10.0
 - torch_npu: 2.10.0.post4
 
+
+### Reference Model Runtime
+
+The competition environment provides the Qwen3.5-4B BF16 model weights for autonomous optimization. AgentForge includes a verified Transformers-based reference runtime for loading and running the model on Ascend 910B2.
+
+The reference runtime is provided for reproducibility and development convenience. Teams may implement their own compatible model runtime; the model weights are standardized, while the internal inference and Harness implementation remain part of the design space.
+
+The model path is provided through `AGENTFORGE_MODEL_PATH`. See `environment.md` for the validated model runtime and dependency versions.
+
 Detailed environment and dependency information is available in `environment.md` and `requirements.txt`.
 
 ## Repository Structure
